@@ -1,7 +1,17 @@
 #include <Servo.h>
 //#define ENCODER_DO_NOT_USE_INTERRUPTS
 #define ENCODER_OPTIMIZE_INTERRUPTS
+/* If the Encoder API is not installed in your Arduino Environement:
+  - Go to 'Sketch' -> 'Include Library' -> 'Manage Libraries...'
+  - Search 'Encoder'
+  - Install 'Encoder by Paul Stoffregen' (This project uses version 1.4.1)
+*/
 #include <Encoder.h>
+/* If the PID API is not installed in your Arduino Environment:
+  - Go to 'Sketch' -> 'Include Library' -> 'Manage Libraries...'
+  - Search 'PID'
+  - Install 'PID by Brett Beauregard' (This project uses version 1.2.0)
+*/
 #include <PID_v1.h>
 
 /*==============================GLOBAL VARS===================================*/
@@ -10,13 +20,14 @@ const unsigned char leftPin = 5;
 const unsigned char rightPin = 6;
 const unsigned char armPin = 9;
 
-//Aux Pins for Motors or I/O
+// Aux Pins for Motors or I/O
+// NOTE: Uncomment these if you're using them
 // const unsigned char aux1Pin = 10;
 // const unsigned char aux2Pin = 11;
 
-//Lights
+// Lights
 const unsigned char boardLedPin = 13;
-//LED Strip
+// LED Strip
 const unsigned char ledPinBlue = 16;
 const unsigned char ledPinRed = 14;
 const unsigned char ledPinGreen = 15;
@@ -31,23 +42,30 @@ enum LEDColor {
   WHITE
 };
 
-//Encoder Pins
+// Encoder Pins
 const unsigned char inttEncPinA = 2;
 const unsigned char inttEncPinB = 3;
+// NOTE: Not using the polling encoder
 // const unsigned char pollEncPinA = 7;
 // const unsigned char pollEncPinB = 8;
 
-//Using Servo API for ESCs
+// Using Servo API for ESCs
 Servo leftSrvo;
 Servo rightSrvo;
 Servo armSrvo;
-// Uncomment these if you want to run additional motors
+// NOTE: Uncomment these if you want to run additional motors
 // Servo aux1Srvo;
 // Servo aux2Srvo;
 
-// If true, arm input = angle
-// If false arm input = motor direction and speed (default)
-bool armAngleMode = false;
+// If MANUAL, arm input = motor direction and speed (default)
+// If ANGLE, arm input = angle
+// If HOLD, arm input = amount by which to change the PID setpoint
+enum ArmMode {
+  ARM_MODE_MANUAL,
+  ARM_MODE_ANGLE,
+  ARM_MODE_HOLD
+};
+ArmMode armMode = ARM_MODE_MANUAL;
 
 // The encoder value at which the arm is considered to be
 // all the way down at "zero" angle.
@@ -55,39 +73,42 @@ int32_t armZeroPoint = 0;
 
 // The multiplier used to convert the arm angle (0 to 250)
 // to the desired encoder value.
-double armScale = 20;
+double armAngleScale = 20;
 
-//Encoders
-/* If the Encoder API is not installed in your Arduino Environement:
-  - Go to 'Sketch' -> 'Include Library' -> 'Manage Libraries...'
-  - Search 'Encoder'
-  - Install 'Encoder by Paul Stoffregen' (This project uses version 1.4.1)
-*/
+// The multiplier used to convert the arm joystick input (0 to 254)
+// to an incremental change in the hold setpoint.
+double armHoldScale = 1;
+
+// Encoders
 Encoder inttEnc(inttEncPinB, inttEncPinA);
+// NOTE: Not using the polling encoder
 // Encoder pollEnc(pollEncPinA, pollEncPinB);
 
-//Interrupt limiting
+// Interrupt limiting
 int interruptsDisabledLoopCount = 0;
 int numLoopsBetweenActivatingInterrupts = 1;
 
-//PID object for arm
-//TODO: SET GAINS
+// PID object for arm
 double myPID_Setpoint, myPID_Input, myPID_Output;
-double Kp=0.43, Ki=0.0001, Kd=0.05; //Gains
+double Kp=0.43, Ki=0.0001, Kd=0.05;  // Gains
 PID myPID(&myPID_Input, &myPID_Output, &myPID_Setpoint, Kp, Ki, Kd, P_ON_E, DIRECT);
 
-//var for checking if comms are lost
+// Setpoint for the arm when in the hold mode. This value gets set
+// to the arm's current position upon entering the hold mode.
+double holdSetpoint = 0;
+
+// For checking if comms are lost
 unsigned long lastTimeRX = 0;
 
 // Used for comms protocol
 bool waitingForStartByte = true;
 
-//Local testing
+// Used in local testing
 int loopCount = 0;
 
 /*=================================SET UP=====================================*/
 void setup() {
-  //57600 baud, pin 13 is an indicator LED
+  // 57600 baud, pin 13 is an indicator LED
   pinMode(boardLedPin, OUTPUT);
   Serial.begin(57600);
   Serial.setTimeout(510);
@@ -111,9 +132,8 @@ void setup() {
   digitalWrite(ledPinRed, LOW);
   digitalWrite(ledPinGreen, LOW);
 
-  // Set Up Arm PID
-  //turn the PID on
-  myPID_Setpoint = 0.0; //TODO: Change this to meaningful value
+  // Set up arm PID
+  myPID_Setpoint = 0.0;
   myPID.SetMode(MANUAL);
   myPID.SetOutputLimits(-500, 500);
 
@@ -124,7 +144,8 @@ void setup() {
 /*=================================LOOP=======================================*/
 void loop() {
   // Poll the encoder
-  //inttEnc.read();
+  // NOTE: Not using the polling encoder
+  // inttEnc.read();
 
   if (waitingForStartByte) {
     // Look for the start byte (255, or 0xFF)
@@ -171,58 +192,83 @@ void processCmd(int left, int right, int arm) {
   // Indicate that we have signal by illuminating the on-board LED
   digitalWrite(boardLedPin, HIGH);
 
-  // Special values: 123 to 126
-  // left/right/arm all == 126 is setup cmd - see main loop
+  // Special values: 123 to 127
+  // If left/right/arm all == 126, then it is a setup cmd - see main loop
   if (arm == 123) {        // reset current arm encoder value as zero point
     armZeroPoint = inttEnc.read();
-    setLEDColor(PURPLE);
+    setLEDColor(BLUEGREEN);
   } else if (arm == 124) { // set arm in angle mode
-    armAngleMode = true;
+    armMode = ARM_MODE_ANGLE;
     myPID.SetMode(AUTOMATIC);
-  } else if (arm == 125) { // set arm in motor mode (default)
-    armAngleMode = false;
+  } else if (arm == 125) { // set arm in manual mode (default)
+    armMode = ARM_MODE_MANUAL;
     myPID.SetMode(MANUAL);
-  } else if (armAngleMode) {
+  } else if (arm == 127) { // set arm in hold mode
+    armMode = ARM_MODE_HOLD;
+    // Reset the hold setpoint to the current arm position.
+    holdSetpoint = (double) (inttEnc.read() - armZeroPoint);
+    myPID.SetMode(AUTOMATIC);
+  } else if (armMode == ARM_MODE_ANGLE) {
     setArmAngle(arm);
+  } else if (armMode == ARM_MODE_HOLD) {
+    moveArmHold(arm);
   } else {
     moveArm(arm);
   }
   runWheels(left, right);
 }
 
-void setArmAngle(int arm) {
-  // Omit the reserved values listed in processCmd (123 - 126)
-  // so that the arm value represents a contiguous range of values.
-  // arm == 127 is valid angle, but represents idle when armAngleMode == false.
-  if (arm > 123) arm -= 4;
-
-  // Multiply the desired arm angle by armScale
-  // to get the desired encoder angle.
-  myPID_Setpoint = ((double) arm) * armScale;
+int runArmPID(double setpoint) {
+  myPID_Setpoint = setpoint;
 
   // Subtract the armZeroPoint from the current encoder value
   // to get the current encoder angle.
   myPID_Input = (double) (inttEnc.read() - armZeroPoint);
   myPID.Compute();
 
-  // Debug output
-//  Serial.print("  PID arm: ");
-//  Serial.print(arm);
-//  Serial.print(", setpoint: ");
-//  Serial.print(myPID_Setpoint);
-//  Serial.print(", input: ");
-//  Serial.print(myPID_Input);
-//  Serial.print(", output:");
-//  Serial.print((int) 1500 - myPID_Output);
-//  Serial.println("");
-
   // Cap the PID command at the endpoints of the command range
   double armMicroseconds = 1500 - myPID_Output;
   if (armMicroseconds > 2000) armMicroseconds = 2000;
   if (armMicroseconds < 1000) armMicroseconds = 1000;
 
-  armSrvo.writeMicroseconds((int) armMicroseconds);
+  // Debug output
+//  Serial.print("  PID setpoint: ");
+//  Serial.print(myPID_Setpoint);
+//  Serial.print(", input: ");
+//  Serial.print(myPID_Input);
+//  Serial.print(", output:");
+//  Serial.print(armMicroseconds);
+//  Serial.println("");
+
+  return ((int) armMicroseconds);
+}
+
+void setArmAngle(int arm) {
+  // Omit the reserved values listed in processCmd (123 - 127)
+  // so that the arm value represents a contiguous range of values.
+  // arm == 128 is valid angle, but represents idle.
+  if (arm > 123) arm -= 5;
+
+  // Multiply the desired arm angle by armAngleScale
+  // to get the desired encoder angle.
+  double setpoint = ((double) arm) * armAngleScale;
+
+  // Run the PID, and set the arm motor value accordingly.
+  armSrvo.writeMicroseconds(runArmPID(setpoint));
   setLEDColor(YELLOW);
+}
+
+void moveArmHold(int arm) {
+  // Recenter the arm command from (0, 254) to (-127, 127)
+  double armRecentered = (double)arm - 127.0;
+
+  // Multiply the arm command by the armHoldScale to get the
+  // desired incremental change to the hold setpoint.
+  holdSetpoint = holdSetpoint + armRecentered * armHoldScale;
+
+  // Run the PID, and set the arm motor value accordingly.
+  armSrvo.writeMicroseconds(runArmPID(holdSetpoint));
+  setLEDColor(PURPLE);
 }
 
 void moveArm(int arm) {
@@ -328,24 +374,20 @@ void blinkBoardLed(int count, int duration) {
 //     <# chars> <Kp>,         <--- string representing value of Kp
 //     <# chars> <Ki>,         <--- string representing value of Ki
 //     <# chars> <Kd>,         <--- string representing value of Kd
-//     <# chars> <armScale>,   <--- string representing value of armScale
+//     <# chars> <armAngleScale>,   <--- string representing value of armAngleScale
 //     <checksum>              <--- sum all chars excluding lengths & 0xFF
 void processSetup() {
-//  Serial.println("Setup:");
-
   // Simple checksum
-  // If needed, consider Fletcher checksum
+  // (If needed, consider Fletcher checksum, instead)
   int checksum = 0;
 
   waitSerialAvailable(1);
   char proportional = serialRead();
   checksum += proportional;
-  // Serial.print("  Proportional on error/measurement: ");
-  // Serial.println(proportional);
 
-  // Read 4 strings and convert to doubles
-  double values[4];
-  for (int valueIndex = 0; valueIndex < 4; ++valueIndex) {
+  // Read 5 strings and convert to doubles
+  double values[5];
+  for (int valueIndex = 0; valueIndex < 5; ++valueIndex) {
     // Read string as # characters followed by characters
     waitSerialAvailable(1);
     int strLen = serialRead();
@@ -359,16 +401,11 @@ void processSetup() {
     strChars[strLen] = 0;
     String valueStr = String(strChars);
     values[valueIndex] = valueStr.toDouble();
-//     Serial.print("  ");
-//     Serial.println(values[valueIndex]);
   }
 
   // Simple sanity check - abort if checksum does not match
   waitSerialAvailable(1);
   if ((checksum & 0xFF) != serialRead()) {
-//    Serial.print("  Checksum did not match. Expected: ");
-//    Serial.println(checksum & 0xFF);
-    // blinkBoardLed(3, 500);
     blinkLED(3, 250, RED);
     return;
   }
@@ -376,7 +413,8 @@ void processSetup() {
   Kp = values[0];
   Ki = values[1];
   Kd = values[2];
-  armScale = values[3];
+  armAngleScale = values[3];
+  armHoldScale = values[4];
   int pOn;
   if (proportional == 'E') {
     pOn = P_ON_E;
@@ -384,22 +422,21 @@ void processSetup() {
     pOn = P_ON_M;
   }
   myPID.SetTunings(Kp, Ki, Kd, pOn);
-//  Serial.println("  PID gains set");
-  // blinkBoardLed(5, 50);
-  blinkLED(5, 50, PURPLE);
-  setLEDColor(PURPLE);
+  blinkLED(5, 50, BLUEGREEN);
+  setLEDColor(BLUEGREEN);
 }
 
 /*============================LOCAL TEST=====================================*/
-//int serialData[] = {255, 127, 127, 127};
+//int serialData[] = {255, 127, 127, 128};
 //int serialIndex = 0;
 //
 //char setupData[][10] = { // max string size + 1 for null terminator
-//  {(char) 255, 126, 126, 126, 'E'}, // setup signal + proportional
-//  "0.1", // Kp
-//  "0", // Ki
-//  "0", // Kd
-//  "40", // armScale
+// {(char) 255, 126, 126, 126, 'E'}, // setup signal + proportional
+// "0.1", // Kp
+// "0", // Ki
+// "0", // Kd
+// "40", // armAngleScale
+// "1", // armHoldScale
 //};
 //int setupChecksum = 152;
 //int setupIndex = 0;
@@ -416,7 +453,7 @@ bool serialAvailable(int count) {
   return Serial.available() >= count;
 
   // Local test
-//  return true;
+// return true;
 }
 
 int serialRead() {
@@ -446,9 +483,9 @@ int serialRead() {
 //    int serialCmd = Serial.read();
 //    Serial.println(serialCmd);
 //
-//    if (serialCmd == 'c') {               // send setup message
+//    if (serialCmd == '0') {               // send setup message
 //      setupCount = 0;
-//    
+//
 //    } else if (serialCmd == 'f') {        // forward
 //      serialData[1] = min(serialData[1] + 10, 254);
 //      serialData[2] = min(serialData[2] + 10, 254);
@@ -458,9 +495,6 @@ int serialRead() {
 //    } else if (serialCmd == 'h') {        // forward full
 //      serialData[1] = 254;
 //      serialData[2] = 254;
-//    } else if (serialCmd == 's') { // stop
-//      serialData[1] = 127;
-//      serialData[2] = 127;
 //    } else if (serialCmd == 'r') { // reverse
 //      serialData[1] = max(serialData[1] - 10, 0);
 //      serialData[2] = max(serialData[2] - 10, 0);
@@ -470,44 +504,46 @@ int serialRead() {
 //    } else if (serialCmd == 'y') { // reverse full
 //      serialData[1] = 0;
 //      serialData[2] = 0;
-//      
-//    } else if (serialCmd == 'u') {        // up
-//      serialData[3] = min(serialData[3] + 10, 254);
-//    } else if (serialCmd == 'i') {        // up small
-//      serialData[3] = min(serialData[3] + 2, 254);
-//    } else if (serialCmd == 'o') {        // up full
-//      serialData[3] = 254;
-//    } else if (serialCmd == 'm') { // stop
+//    } else if (serialCmd == 's') { // stop wheels
+//      serialData[1] = 128;
+//      serialData[2] = 128;
+//
+//    } else if (serialCmd == 'z') { // reset arm zero point
+//      serialData[3] = 123;
+//    } else if (serialCmd == 'x') { // put arm in manual mode
+//      serialData[3] = 125;
+//    } else if (serialCmd == 'c') { // put arm in angle mode
+//      serialData[3] = 124;
+//    } else if (serialCmd == 'v') { // put arm in hold mode
 //      serialData[3] = 127;
-//    } else if (serialCmd == 'j') { // down
+//
+//    } else if (serialCmd == 'u') {  // up
+//      int arm = min(serialData[3] + 10, 254);
+//      if (arm >= 123 && arm <= 127) arm = 128;
+//      serialData[3] = arm;
+//    } else if (serialCmd == 'i') {  // up small
+//      int arm = min(serialData[3] + 1, 254);
+//      if (arm >= 123 && arm <= 127) arm = 128;
+//      serialData[3] = arm;
+//    } else if (serialCmd == 'o') {  // up full
+//      serialData[3] = 254;
+//    } else if (serialCmd == 'j') {  // down
 //      serialData[3] = max(serialData[3] - 10, 0);
-//    } else if (serialCmd == 'k') { // down small
-//      serialData[3] = max(serialData[3] - 2, 0);
-//    } else if (serialCmd == 'l') { // down full
+//    } else if (serialCmd == 'k') {  // down small
+//      serialData[3] = max(serialData[3] - 1, 0);
+//    } else if (serialCmd == 'l') {  // down full
 //      serialData[3] = 0;
-//      
-//    } else if (serialCmd == 'q') { // arm up
-//      int arm = min(serialData[3] + 1, 250);
-//      if (arm >= 123 && arm <= 126) arm = 127;
-//      serialData[3] = arm;
-//    } else if (serialCmd == 'a') { // arm down
-//      int arm = max(serialData[3] - 1, 0);
-//      if (arm >= 123 && arm <= 126) arm = 127;
-//      serialData[3] = arm;
+//    } else if (serialCmd == 'm') {  // stop arm
+//      serialData[3] = 128;
+//     
 //    } else if (serialCmd == '1') { // set arm angle to 1 degree
 //      serialData[3] = 1;
-//    } else if (serialCmd == '5') { // set arm angle to 124 degree
-//      serialData[3] = 127;
-//    } else if (serialCmd == '9') { // set arm angle to 250 degree
-//      serialData[3] = 254;
-//    } else if (serialCmd == 'z') { // set arm zero point
-//      serialData[3] = 123;
-//    } else if (serialCmd == 'x') { // toggle arm angle/motor mode
-//      if (!armAngleMode) {
-//        serialData[3] = 124;
-//      } else {
-//        serialData[3] = 125;
-//      }
+//    } else if (serialCmd == '2') { // set arm angle to 10 degree
+//      serialData[3] = 10;
+//    } else if (serialCmd == '3') { // set arm angle to 80 degree
+//      serialData[3] = 80;
+//    } else if (serialCmd == '4') { // set arm angle to 120 degree
+//      serialData[3] = 120;
 //    }
 //  }
 //  int value = serialData[serialIndex];
@@ -517,4 +553,3 @@ int serialRead() {
 //  }
 //  return value;
 }
-

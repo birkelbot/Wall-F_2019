@@ -26,16 +26,22 @@ ser = serial.Serial(comPort, 57600, timeout=1)
 #    Right trigger -- arm up (analog control)
 #    Left trigger -- arm down (analog control)
 #    Start button -- consider the current position the new "down" position for auto mode
-#    Press either bumper -- enter auto mode
+#    Press right bumper -- enter auto mode
+#    Hold left bumper -- enter hold mode
 #  In auto mode...
 #    Nothing -- arm goes to "down" position
 #    Hold one bumper (either one) -- arm goes to "over bumps" position
 #    Hold both bumpers -- arm goes to "up" position
-#    Press either trigger -- kick out to manual mode
-#    A button -- kick out to manual mode
+#    Press either trigger -- return to manual mode
+#    'A' button -- return to manual mode
+#  In hold mode...
+#    Right trigger -- move the setpoint up (analog control)
+#    Left trigger -- move the setpoint down (analog control)
+#    Release left bumper -- return to manual mode
 #######################
 
 # Set the channel numbers for various controls
+BUTTON_ID_ARM_HOLD = 4  # Button used to put the arm in hold mode
 BUTTON_IDS_ARM_AUTO = [4, 5]  # Buttons used to control arm in auto mode
 BUTTON_ID_EXIT_AUTO = 0  # Button used to forcefully exit auto mode
 BUTTON_ID_RESET_ARM_POS = 7  # Button used to zero the arm position
@@ -45,8 +51,9 @@ AXIS_ID_ARM_MANUAL = 2  # Analog triggers for manual arm control
 BUTTON_ID_STOP_PROGRAM = 1
 
 class ArmMode(Enum):
-    AUTO = 0
-    MANUAL = 1
+    MANUAL = 0
+    ANGLE = 1
+    HOLD = 2
 
 # Set the preset values for automatic arm control
 ARM_POS_DOWN = 0
@@ -56,19 +63,22 @@ ARM_POS_UP = 80
 # Set the PID gains (only transmitted when hitting the "send PID gains" button)
 PID_ERROR_OR_MEASUREMENT = 'E'  # 'E' for error, 'M' for measurement
 PID_P_GAIN = "0.43"  # Must be a double in string format
-PID_I_GAIN = "0.0001"  # Must be a double in string format
+PID_I_GAIN = "0"
+#PID_I_GAIN = "0.0001"  # Must be a double in string format
 PID_D_GAIN = "0.05"  # Must be a double in string format
-ARM_SCALE_FACTOR = "20"  # Must be a double in string format
+ARM_ANGLE_SCALE_FACTOR = "20"  # Must be a double in string format
+ARM_HOLD_SCALE_FACTOR = "1"  # Must be a double in string format
 
 # Set the reserved values for communicating special signals to the robot.
 # NOTE: Reserved values are selected around 127 ("zero motor power") since those values are rarely
 #       used because it takes more power than that to overcome the motor and gearbox resistance.
-RESERVED_VALUES_MAX = 126  # The highest reserved value
+RESERVED_VALUES_MAX = 127  # The highest reserved value
 RESERVED_VALUES_MIN = 123  # The lowest reserved value
 RESERVED_VALUE_ENTER_ARM_AUTO = 124
 RESERVED_VALUE_ENTER_ARM_MANUAL = 125
 RESERVED_VALUE_RESET_ARM_POS = 123
 RESERVED_VALUE_SET_PID_GAINS = 126
+RESERVED_VALUE_ENTER_ARM_HOLD = 127
 
 # Set the number of times to transmit each mode change message
 RESEND_COUNT_MODE_CHANGE = 3
@@ -114,7 +124,7 @@ def main():
             # Get the drive motor commands for Arcade Drive
             driveMtrCmds = arcadeDrive(yRaw, rRaw)
             driveMtrCmds['left'] = 255 - driveMtrCmds['left']
-            driveMtrCmds['right'] = 255 - driveMtrCmds['right']
+            driveMtrCmds['right'] = driveMtrCmds['right']
 
             # Protect against sending a reserved value
             if driveMtrCmds['left'] == RESERVED_VALUE_SET_PID_GAINS:
@@ -128,21 +138,25 @@ def main():
 
             # Get the raw values for the arm using the gamepad
             armRawManual = joysticks[0].get_axis(AXIS_ID_ARM_MANUAL)
+            armHoldBtn = joysticks[0].get_button(BUTTON_ID_ARM_HOLD)
             armAutoNumBtns = (1 if joysticks[0].get_button(BUTTON_IDS_ARM_AUTO[0]) else 0) + \
                                (1 if joysticks[0].get_button(BUTTON_IDS_ARM_AUTO[1]) else 0)
             armBtnExitAuto = joysticks[0].get_button(BUTTON_ID_EXIT_AUTO)
             armBtnZero = joysticks[0].get_button(BUTTON_ID_RESET_ARM_POS)
             armBtnSendPIDGains = joysticks[0].get_button(BUTTON_ID_SEND_PID_GAINS)
 
-            (rawArmCmd, currArmMode) = armDrive(armRawManual, armAutoNumBtns, armBtnExitAuto, prevArmMode)
+            (rawArmCmd, currArmMode) = armDrive(armRawManual, armHoldBtn, armAutoNumBtns, armBtnExitAuto, prevArmMode)
 
             if transmitXTimes > 0:
                 armCmd = prevArmCmd
-            elif currArmMode == ArmMode.MANUAL and prevArmMode == ArmMode.AUTO:
+            elif currArmMode == ArmMode.MANUAL and prevArmMode != ArmMode.MANUAL:
                 armCmd = RESERVED_VALUE_ENTER_ARM_MANUAL
                 transmitXTimes = RESEND_COUNT_MODE_CHANGE
-            elif currArmMode == ArmMode.AUTO and prevArmMode == ArmMode.MANUAL:
+            elif currArmMode == ArmMode.ANGLE and prevArmMode != ArmMode.ANGLE:
                 armCmd = RESERVED_VALUE_ENTER_ARM_AUTO
+                transmitXTimes = RESEND_COUNT_MODE_CHANGE
+            elif currArmMode == ArmMode.HOLD and prevArmMode != ArmMode.HOLD:
+                armCmd = RESERVED_VALUE_ENTER_ARM_HOLD
                 transmitXTimes = RESEND_COUNT_MODE_CHANGE
             elif armBtnZero:
                 armCmd = RESERVED_VALUE_RESET_ARM_POS
@@ -202,10 +216,15 @@ def main():
                         ser.write(PID_D_GAIN[i])
                         checksum += ord(PID_D_GAIN[i])
 
-                    ser.write(chr(len(ARM_SCALE_FACTOR)))
-                    for i in range(0, len(ARM_SCALE_FACTOR)):
-                        ser.write(ARM_SCALE_FACTOR[i])
-                        checksum += ord(ARM_SCALE_FACTOR[i])
+                    ser.write(chr(len(ARM_ANGLE_SCALE_FACTOR)))
+                    for i in range(0, len(ARM_ANGLE_SCALE_FACTOR)):
+                        ser.write(ARM_ANGLE_SCALE_FACTOR[i])
+                        checksum += ord(ARM_ANGLE_SCALE_FACTOR[i])
+
+                    ser.write(chr(len(ARM_HOLD_SCALE_FACTOR)))
+                    for i in range(0, len(ARM_HOLD_SCALE_FACTOR)):
+                        ser.write(ARM_HOLD_SCALE_FACTOR[i])
+                        checksum += ord(ARM_HOLD_SCALE_FACTOR[i])
 
                     ser.write(chr(checksum & 0x0FF))
 
@@ -244,7 +263,8 @@ def arcadeDrive(yIn, rIn):
     rEndpoint = 70   # maximum/minimum (+/-) for the rotation
 
     # Set a deadband for the raw joystick input
-    deadband = 0.10
+    yDeadband = 0.10
+    rDeadband = 0.17
 
     # Set a base command (within the command range above) to overcome gearbox resistance at low drive speeds
     leftMtrBaseCmd = int(2)
@@ -262,12 +282,10 @@ def arcadeDrive(yIn, rIn):
         rNeg = 1
 
     # Apply a deadband
-    if abs(yIn) < deadband:
+    if abs(yIn) < yDeadband:
         yIn = 0
-    if abs(rIn) < deadband:
+    if abs(rIn) < rDeadband:
         rIn = 0
-
-    # print("X: ", xIn, " Y: ", yIn, " R: ", rIn)
     
     # Compute the drive commands using the exponential function (zero-based)
     yCmd = int(yNeg*(math.pow(math.e, math.pow(math.fabs(yIn), yExpConst)/endExpConst)-1)*yEndpoint) # zero-based
@@ -299,12 +317,8 @@ def arcadeDrive(yIn, rIn):
         else:
             scaleFactor = float(minCommand) / float(minMtrCmd)
 
-    # print("maxMtrCmd: ", maxMtrCmd, " minMtrCmd: ", minMtrCmd, " maxCommand: ", maxCommand, " minCommand: ", minCommand, " scaleFactor: ", scaleFactor)
-
     leftdriveMtrCmdScaled = leftMtrCmd * scaleFactor
     rightdriveMtrCmdScaled = rightMtrCmd * scaleFactor
-
-    # print("L scaled: ", leftdriveMtrCmdScaled, " R scaled: ", rightdriveMtrCmdScaled)
 
     # Shift the commands to be based on the zeroCommand (above)
     leftMtrCmdFinal = int(leftdriveMtrCmdScaled + zeroCommand)
@@ -316,22 +330,26 @@ def arcadeDrive(yIn, rIn):
 ############################################################
 ## @brief  Function to compute the arm drive command
 ## @param  manualIn - raw analog trigger input from -1.0 to 1.0
+## @param  armHoldBtn - whether or not the arm hold button is currently pressed
 ## @param  autoNumBtns - the total number of buttons being pressed for automatic arm control
 ## @param  exitAuto - whether to forcefully exit automatic control
 ## @param  prevMode - mode of the arm from the previous iteration
 ## @return (the arm command, the arm mode)
 ############################################################
-def armDrive(manualIn, autoNumBtns, exitAuto, prevMode):
+def armDrive(manualIn, armHoldBtn, autoNumBtns, exitAuto, prevMode):
 
     ZERO_COMMAND = 127  # the default value that corresponds to no motor power
 
     manualCmd = manualArmDrive(manualIn)
-    
-    if manualCmd != ZERO_COMMAND or (prevMode == ArmMode.MANUAL and autoNumBtns == 0) or exitAuto:
+
+    if armHoldBtn and prevMode != ArmMode.ANGLE:
+        currMode = ArmMode.HOLD
+        armCmd = manualCmd
+    elif manualCmd != ZERO_COMMAND or (prevMode != ArmMode.ANGLE and autoNumBtns == 0) or exitAuto:
         currMode = ArmMode.MANUAL 
         armCmd = manualCmd
-    else:  # manualCmd == 0 and (prevMode == ArmMode.AUTO or autoNumBtns > 0) and !exitAuto
-        currMode = ArmMode.AUTO
+    else:  # manualCmd == 0 and (prevMode == ArmMode.ANGLE or autoNumBtns > 0) and !exitAuto
+        currMode = ArmMode.ANGLE
         if autoNumBtns == 0:
             armCmd = ARM_POS_DOWN
         elif autoNumBtns == 1:
