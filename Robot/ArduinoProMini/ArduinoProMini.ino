@@ -69,7 +69,7 @@ ArmMode armMode = ARM_MODE_MANUAL;
 
 // The encoder value at which the arm is considered to be
 // all the way down at "zero" angle.
-int32_t armZeroPoint = 0;
+int armZeroPoint = 0;
 
 // The multiplier used to convert the arm angle (0 to 250)
 // to the desired encoder value.

@@ -369,6 +369,10 @@ def armDrive(manualIn, armHoldBtn, autoNumBtns, exitAuto, prevMode):
 ## @return the arm command (0 to 254)
 ############################################################
 def manualArmLinDrive(aIn):
+    deadband = 0.01
+    if (-deadband < aIn and aIn < deadband):
+        aIn = 0.0
+
     return int(interp(aIn, [-1, 1], [0, 254]))
 
 
