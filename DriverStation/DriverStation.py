@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from enum import Enum
+from numpy import interp
 import pygame
 import time
 import os
@@ -340,7 +341,9 @@ def armDrive(manualIn, armHoldBtn, autoNumBtns, exitAuto, prevMode):
 
     ZERO_COMMAND = 127  # the default value that corresponds to no motor power
 
-    manualCmd = manualArmDrive(manualIn)
+    # NOTE: Choose linear or exponential drive by changing between
+    #       `manualArmLinDrive()` and `manualArmExpDrive()`
+    manualCmd = manualArmLinDrive(manualIn)
 
     if armHoldBtn and prevMode != ArmMode.ANGLE:
         currMode = ArmMode.HOLD
@@ -361,10 +364,21 @@ def armDrive(manualIn, armHoldBtn, autoNumBtns, exitAuto, prevMode):
 
 ############################################################
 ## @brief  Function to compute the manual arm drive command
+##         following a linear control curve
 ## @param  aIn - raw input from -1.0 to 1.0
-## @return the arm command
+## @return the arm command (0 to 254)
 ############################################################
-def manualArmDrive(aIn):
+def manualArmLinDrive(aIn):
+    return int(interp(aIn, [-1, 1], [0, 254]))
+
+
+############################################################
+## @brief  Function to compute the manual arm drive command
+##         following an exponential control curve
+## @param  aIn - raw input from -1.0 to 1.0
+## @return the arm command (0 to 254)
+############################################################
+def manualArmExpDrive(aIn):
 
     # Set output command range constants
     zeroCommand = int(127)  # the default value that corresponds to no motor power
