@@ -347,7 +347,7 @@ def armDrive(manualIn, armHoldBtn, autoNumBtns, exitAuto, prevMode):
 
     if armHoldBtn and prevMode != ArmMode.ANGLE:
         currMode = ArmMode.HOLD
-        armCmd = manualCmd
+        armCmd = 254 - manualCmd
     elif manualCmd != ZERO_COMMAND or (prevMode != ArmMode.ANGLE and autoNumBtns == 0) or exitAuto:
         currMode = ArmMode.MANUAL 
         armCmd = manualCmd

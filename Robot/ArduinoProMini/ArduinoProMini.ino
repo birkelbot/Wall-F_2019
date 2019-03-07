@@ -77,7 +77,7 @@ double armAngleScale = 20;
 
 // The multiplier used to convert the arm joystick input (0 to 254)
 // to an incremental change in the hold setpoint.
-double armHoldScale = 1;
+double armHoldScale = 0.5;
 
 // Encoders
 Encoder inttEnc(inttEncPinB, inttEncPinA);
